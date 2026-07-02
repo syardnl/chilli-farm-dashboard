@@ -51,110 +51,189 @@ export default function Dashboard() {
   }, [router]);
 
   // ---- live readings (Phase 5.4) ----
-  useEffect(() => {
-    if (checkingAuth) return;
+  // ---- auth guard ----
+useEffect(() => {
+  supabase.auth.getSession().then(({ data: { session } }) => {
+    if (!session) {
+      router.push("/login");
+    } else {
+      setCheckingAuth(false);
+    }
+  });
 
-    supabase
-      .from("readings")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .then(({ data }) => setLatest(data?.[0] ?? null));
+  const { data: listener } = supabase.auth.onAuthStateChange(
+    (_event, session) => {
+      if (!session) router.push("/login");
+    }
+  );
 
-    const channel = supabase
-      .channel("readings-live")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "readings" },
-        (payload) => setLatest(payload.new)
-      )
-      .subscribe();
+  return () => {
+    listener.subscription.unsubscribe();
+  };
+}, [router]);
 
-    return () => supabase.removeChannel(channel);
-  }, [checkingAuth]);
+// ---- live readings ----
+useEffect(() => {
+  if (checkingAuth) return;
 
-  // ---- stale-data banner (Phase 8.1) ----
-  useEffect(() => {
-    const check = setInterval(() => {
-      if (!latest?.created_at) return;
-      const ageMs = Date.now() - new Date(latest.created_at).getTime();
-      setStale(ageMs > 60_000);
-    }, 5000);
-    return () => clearInterval(check);
-  }, [latest]);
+  // initial fetch
+  supabase
+    .from("readings")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .then(({ data }) => {
+      setLatest(data?.[0] ?? null);
+    });
 
-  // ---- confirmed device state (Phase 6.2) ----
-  useEffect(() => {
-    if (checkingAuth) return;
+  // realtime
+  const channel = supabase
+    .channel("readings-live")
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "readings",
+      },
+      (payload) => {
+        setLatest(payload.new);
+      }
+    )
+    .subscribe((status) => {
+      console.log("Readings channel:", status);
+    });
 
-    supabase
-      .from("device_state")
-      .select("*")
-      .then(({ data }) => {
-        if (!data) return;
-        const next = {};
-        data.forEach((row) => (next[row.device] = row.state));
-        setDeviceState((prev) => ({ ...prev, ...next }));
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}, [checkingAuth]);
+
+// ---- stale banner ----
+useEffect(() => {
+  const timer = setInterval(() => {
+    if (!latest?.created_at) return;
+
+    const age =
+      Date.now() - new Date(latest.created_at).getTime();
+
+    setStale(age > 60000);
+  }, 5000);
+
+  return () => clearInterval(timer);
+}, [latest]);
+
+// ---- confirmed device state ----
+useEffect(() => {
+  if (checkingAuth) return;
+
+  // initial fetch
+  supabase
+    .from("device_state")
+    .select("*")
+    .then(({ data }) => {
+      if (!data) return;
+
+      const next = {};
+
+      data.forEach((row) => {
+        next[row.device] = row.state;
       });
 
-    const channel = supabase
-      .channel("state-live")
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "device_state" },
-        (payload) =>
-          setDeviceState((prev) => ({
-            ...prev,
-            [payload.new.device]: payload.new.state,
-          }))
-      )
-      .subscribe();
+      setDeviceState(next);
+    });
 
-    return () => supabase.removeChannel(channel);
-  }, [checkingAuth]);
+  // realtime
+  const channel = supabase
+    .channel("device-state-live")
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "device_state",
+      },
+      (payload) => {
+        setDeviceState((prev) => ({
+          ...prev,
+          [payload.new.device]: payload.new.state,
+        }));
+      }
+    )
+    .subscribe((status) => {
+      console.log("Device state:", status);
+    });
 
-  // ---- AI scores + insight (Phase 7.3) ----
-  // NOTE: fixed to query ai_scores / ai_insights instead of readings
-  useEffect(() => {
-    if (checkingAuth) return;
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}, [checkingAuth]);
 
-    supabase
-      .from("ai_scores")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .then(({ data }) => setAiScore(data?.[0] ?? null));
+// ---- AI scores + insights ----
+useEffect(() => {
+  if (checkingAuth) return;
 
-    supabase
-      .from("ai_insights")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .then(({ data }) => setInsight(data?.[0] ?? null));
+  // latest ai score
+  supabase
+    .from("ai_scores")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .then(({ data }) => {
+      setAiScore(data?.[0] ?? null);
+    });
 
-    const scoreChannel = supabase
-      .channel("ai-scores-live")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "ai_scores" },
-        (payload) => setAiScore(payload.new)
-      )
-      .subscribe();
+  // latest insight
+  supabase
+    .from("ai_insights")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .then(({ data }) => {
+      setInsight(data?.[0] ?? null);
+    });
 
-    const insightChannel = supabase
-      .channel("ai-insights-live")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "ai_insights" },
-        (payload) => setInsight(payload.new)
-      )
-      .subscribe();
+  // realtime ai scores
+  const scoreChannel = supabase
+    .channel("ai-score-live")
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "ai_scores",
+      },
+      (payload) => {
+        setAiScore(payload.new);
+      }
+    )
+    .subscribe((status) => {
+      console.log("AI Score:", status);
+    });
 
-    return () => {
-      supabase.removeChannel(scoreChannel);
-      supabase.removeChannel(insightChannel);
-    };
-  }, [checkingAuth]);
+  // realtime insights
+  const insightChannel = supabase
+    .channel("ai-insight-live")
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "ai_insights",
+      },
+      (payload) => {
+        setInsight(payload.new);
+      }
+    )
+    .subscribe((status) => {
+      console.log("AI Insight:", status);
+    });
+
+  return () => {
+    supabase.removeChannel(scoreChannel);
+    supabase.removeChannel(insightChannel);
+  };
+}, [checkingAuth]);
 
   // ---- actuator control (Phase 6.1 + 6.3 debounce) ----
   async function sendCommand(device, value, busyFlag, setBusy) {
@@ -577,3 +656,5 @@ function formatMinutes(mins) {
   const m = mins % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
+
+
