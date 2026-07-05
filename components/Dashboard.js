@@ -216,7 +216,11 @@ useEffect(() => {
 }, [checkingAuth]);
 
   // ---- actuator control (optimistic UI + rollback) ----
-  async function sendCommand(device, value, busyFlag, setBusy) {
+  // `value` = what gets sent to the commands table (the action, e.g. "close")
+  // `optimisticState` = what device_state actually stores once applied (e.g. "closed")
+  // These can differ (roof: action "close" -> resulting state "closed"), so
+  // both must be passed explicitly instead of assuming they're the same string.
+  async function sendCommand(device, value, optimisticState, busyFlag, setBusy) {
     if (busyFlag) return;
     setBusy(true);
 
@@ -224,7 +228,7 @@ useEffect(() => {
     const previousValue = deviceState[device];
 
     // optimistic update: reflect the change immediately, don't wait for Realtime
-    setDeviceState((prev) => ({ ...prev, [device]: value }));
+    setDeviceState((prev) => ({ ...prev, [device]: optimisticState }));
 
     const { error } = await supabase
       .from("commands")
@@ -376,8 +380,8 @@ useEffect(() => {
               onLabel="ON"
               offLabel="OFF"
               busy={pumpBusy}
-              onClickOn={() => sendCommand("pump", "on", pumpBusy, setPumpBusy)}
-              onClickOff={() => sendCommand("pump", "off", pumpBusy, setPumpBusy)}
+              onClickOn={() => sendCommand("pump", "on", "on", pumpBusy, setPumpBusy)}
+              onClickOff={() => sendCommand("pump", "off", "off", pumpBusy, setPumpBusy)}
             />
             <ActuatorCard
               name="Roof"
@@ -387,8 +391,8 @@ useEffect(() => {
               stateOnValue="closed"
               stateOffValue="open"
               busy={roofBusy}
-              onClickOn={() => sendCommand("roof", "close", roofBusy, setRoofBusy)}
-              onClickOff={() => sendCommand("roof", "open", roofBusy, setRoofBusy)}
+              onClickOn={() => sendCommand("roof", "close", "closed", roofBusy, setRoofBusy)}
+              onClickOff={() => sendCommand("roof", "open", "open", roofBusy, setRoofBusy)}
             />
           </div>
         </section>
