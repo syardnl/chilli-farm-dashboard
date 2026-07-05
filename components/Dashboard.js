@@ -31,26 +31,6 @@ export default function Dashboard() {
   const [pumpBusy, setPumpBusy] = useState(false);
   const [roofBusy, setRoofBusy] = useState(false);
 
-  // ---- auth guard (Phase 5.5) ----
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
-        router.push("/login");
-      } else {
-        setCheckingAuth(false);
-      }
-    });
-
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        if (!session) router.push("/login");
-      }
-    );
-
-    return () => listener.subscription.unsubscribe();
-  }, [router]);
-
-  // ---- live readings (Phase 5.4) ----
   // ---- auth guard ----
 useEffect(() => {
   supabase.auth.getSession().then(({ data: { session } }) => {
@@ -235,14 +215,27 @@ useEffect(() => {
   };
 }, [checkingAuth]);
 
-  // ---- actuator control (Phase 6.1 + 6.3 debounce) ----
+  // ---- actuator control (optimistic UI + rollback) ----
   async function sendCommand(device, value, busyFlag, setBusy) {
     if (busyFlag) return;
     setBusy(true);
+
+    // remember previous state in case we need to roll back
+    const previousValue = deviceState[device];
+
+    // optimistic update: reflect the change immediately, don't wait for Realtime
+    setDeviceState((prev) => ({ ...prev, [device]: value }));
+
     const { error } = await supabase
       .from("commands")
       .insert({ device, action: "set", value });
-    if (error) alert("Command failed: " + error.message);
+
+    if (error) {
+      // rollback on failure
+      setDeviceState((prev) => ({ ...prev, [device]: previousValue }));
+      alert("Command failed: " + error.message);
+    }
+
     setTimeout(() => setBusy(false), 1500);
   }
 
@@ -656,5 +649,3 @@ function formatMinutes(mins) {
   const m = mins % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
-
-
