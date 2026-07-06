@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import ChilliPlant3D from "./ChilliPlant3D";
@@ -20,6 +20,7 @@ const COLORS = {
 
 const HISTORY_LIMIT = 30; // how many recent readings to keep for the chart
 const POLL_MS = 10000; // safety-net polling interval, runs alongside realtime
+const PENDING_TIMEOUT_MS = 8000; // give up waiting for confirmation after this long
 
 export default function Dashboard() {
   const router = useRouter();
@@ -39,6 +40,36 @@ export default function Dashboard() {
 
   // NEW: surfaces realtime connection problems instead of failing silently
   const [realtimeIssue, setRealtimeIssue] = useState(false);
+
+  // ---- FIX: tracks devices with a command in flight, so a stale poll or
+  // realtime event can't stomp on the optimistic value before the backend
+  // has actually confirmed it. Keyed by device -> { target, timeoutId }.
+  const pendingRef = useRef({});
+
+  // Applies an incoming {device: state} update from either the poll or the
+  // realtime subscription. If a device is "pending" (a command is in
+  // flight), the incoming value is only accepted once it matches the
+  // target the user actually asked for -- anything else (i.e. the old,
+  // not-yet-updated value) is ignored instead of overwriting the optimistic UI.
+  function applyConfirmedDeviceState(incoming, { busySetters } = {}) {
+    setDeviceState((prev) => {
+      const next = { ...prev };
+      for (const [device, state] of Object.entries(incoming)) {
+        const pending = pendingRef.current[device];
+        if (pending && state !== pending.target) {
+          // Stale value relative to an in-flight command -- skip it.
+          continue;
+        }
+        next[device] = state;
+        if (pending) {
+          clearTimeout(pending.timeoutId);
+          delete pendingRef.current[device];
+          busySetters?.[device]?.(false);
+        }
+      }
+      return next;
+    });
+  }
 
   // ---- auth guard ----
   useEffect(() => {
@@ -138,17 +169,22 @@ export default function Dashboard() {
   useEffect(() => {
     if (checkingAuth) return;
 
+    const busySetters = { pump: setPumpBusy, roof: setRoofBusy };
+
     const fetchDeviceState = () => {
       supabase
         .from("device_state")
         .select("*")
         .then(({ data }) => {
           if (!data) return;
-          const next = {};
+          const incoming = {};
           data.forEach((row) => {
-            next[row.device] = row.state;
+            incoming[row.device] = row.state;
           });
-          setDeviceState(next);
+          // FIX: routed through applyConfirmedDeviceState so a poll tick
+          // that lands mid-command can't overwrite the optimistic value
+          // with the still-stale row from before the command took effect.
+          applyConfirmedDeviceState(incoming, { busySetters });
         });
     };
 
@@ -160,10 +196,11 @@ export default function Dashboard() {
         "postgres_changes",
         { event: "*", schema: "public", table: "device_state" },
         (payload) => {
-          setDeviceState((prev) => ({
-            ...prev,
-            [payload.new.device]: payload.new.state,
-          }));
+          // FIX: same guard applied to the realtime path for consistency.
+          applyConfirmedDeviceState(
+            { [payload.new.device]: payload.new.state },
+            { busySetters }
+          );
         }
       )
       .subscribe((status) => {
@@ -242,16 +279,34 @@ export default function Dashboard() {
     const previousValue = deviceState[device];
     setDeviceState((prev) => ({ ...prev, [device]: optimisticState }));
 
+    // FIX: mark this device "pending" so the poll/realtime handlers know
+    // to ignore any confirmation that doesn't match this target value yet
+    // -- this is what stops the temporary revert-then-correct flicker.
+    if (pendingRef.current[device]) {
+      clearTimeout(pendingRef.current[device].timeoutId);
+    }
+    const timeoutId = setTimeout(() => {
+      // Safety net: if nothing ever confirms (backend down, dropped
+      // message, etc.), don't leave the button permanently disabled.
+      delete pendingRef.current[device];
+      setBusy(false);
+    }, PENDING_TIMEOUT_MS);
+    pendingRef.current[device] = { target: optimisticState, timeoutId };
+
     const { error } = await supabase
       .from("commands")
       .insert({ device, action: "set", value });
 
     if (error) {
+      clearTimeout(timeoutId);
+      delete pendingRef.current[device];
       setDeviceState((prev) => ({ ...prev, [device]: previousValue }));
+      setBusy(false);
       alert("Command failed: " + error.message);
     }
-
-    setTimeout(() => setBusy(false), 1500);
+    // NOTE: on success, setBusy(false) now happens inside
+    // applyConfirmedDeviceState once the real state actually arrives
+    // (or via the timeout above as a fallback) -- not on a blind delay.
   }
 
   // ---- ask the farm ----
