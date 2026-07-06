@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import ChilliPlant3D from "./ChilliPlant3D";
+import ReadingsChart from "./ReadingsChart";
 
 // ---------- design tokens ----------
 const COLORS = {
@@ -16,11 +18,15 @@ const COLORS = {
   muted: "#948573",
 };
 
+const HISTORY_LIMIT = 30; // how many recent readings to keep for the chart
+const POLL_MS = 10000; // safety-net polling interval, runs alongside realtime
+
 export default function Dashboard() {
   const router = useRouter();
   const [checkingAuth, setCheckingAuth] = useState(true);
 
   const [latest, setLatest] = useState(null);
+  const [history, setHistory] = useState([]); // most-recent-first
   const [stale, setStale] = useState(false);
   const [deviceState, setDeviceState] = useState({ pump: "off", roof: "open" });
   const [aiScore, setAiScore] = useState(null);
@@ -31,203 +37,209 @@ export default function Dashboard() {
   const [pumpBusy, setPumpBusy] = useState(false);
   const [roofBusy, setRoofBusy] = useState(false);
 
+  // NEW: surfaces realtime connection problems instead of failing silently
+  const [realtimeIssue, setRealtimeIssue] = useState(false);
+
   // ---- auth guard ----
-useEffect(() => {
-  supabase.auth.getSession().then(({ data: { session } }) => {
-    if (!session) {
-      router.push("/login");
-    } else {
-      setCheckingAuth(false);
-    }
-  });
-
-  const { data: listener } = supabase.auth.onAuthStateChange(
-    (_event, session) => {
-      if (!session) router.push("/login");
-    }
-  );
-
-  return () => {
-    listener.subscription.unsubscribe();
-  };
-}, [router]);
-
-// ---- live readings ----
-useEffect(() => {
-  if (checkingAuth) return;
-
-  // initial fetch
-  supabase
-    .from("readings")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .then(({ data }) => {
-      setLatest(data?.[0] ?? null);
-    });
-
-  // realtime
-  const channel = supabase
-    .channel("readings-live")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "readings",
-      },
-      (payload) => {
-        setLatest(payload.new);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        router.push("/login");
+      } else {
+        setCheckingAuth(false);
       }
-    )
-    .subscribe((status) => {
-      console.log("Readings channel:", status);
     });
 
-  return () => {
-    supabase.removeChannel(channel);
-  };
-}, [checkingAuth]);
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        if (!session) router.push("/login");
+      }
+    );
 
-// ---- stale banner ----
-useEffect(() => {
-  const timer = setInterval(() => {
-    if (!latest?.created_at) return;
+    return () => {
+      listener.subscription.unsubscribe();
+    };
+  }, [router]);
 
-    const age =
-      Date.now() - new Date(latest.created_at).getTime();
+  // ---- live readings (single latest row) ----
+  useEffect(() => {
+    if (checkingAuth) return;
 
-    setStale(age > 60000);
-  }, 5000);
+    const fetchLatest = () => {
+      supabase
+        .from("readings")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .then(({ data, error }) => {
+          if (!error) setLatest(data?.[0] ?? null);
+        });
+    };
 
-  return () => clearInterval(timer);
-}, [latest]);
+    fetchLatest();
 
-// ---- confirmed device state ----
-useEffect(() => {
-  if (checkingAuth) return;
-
-  // initial fetch
-  supabase
-    .from("device_state")
-    .select("*")
-    .then(({ data }) => {
-      if (!data) return;
-
-      const next = {};
-
-      data.forEach((row) => {
-        next[row.device] = row.state;
+    const channel = supabase
+      .channel("readings-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "readings" },
+        (payload) => {
+          setLatest(payload.new);
+          setHistory((prev) => [payload.new, ...prev].slice(0, HISTORY_LIMIT));
+        }
+      )
+      .subscribe((status) => {
+        console.log("Readings channel:", status);
+        setRealtimeIssue(status !== "SUBSCRIBED");
       });
 
-      setDeviceState(next);
-    });
+    // NEW: polling fallback — if realtime silently drops (RLS/publication
+    // misconfig, network hiccup, etc.) the page still refreshes on its own.
+    const poll = setInterval(fetchLatest, POLL_MS);
 
-  // realtime
-  const channel = supabase
-    .channel("device-state-live")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "device_state",
-      },
-      (payload) => {
-        setDeviceState((prev) => ({
-          ...prev,
-          [payload.new.device]: payload.new.state,
-        }));
-      }
-    )
-    .subscribe((status) => {
-      console.log("Device state:", status);
-    });
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(poll);
+    };
+  }, [checkingAuth]);
 
-  return () => {
-    supabase.removeChannel(channel);
-  };
-}, [checkingAuth]);
+  // NEW: history for the trend chart (separate from the single "latest" fetch above)
+  useEffect(() => {
+    if (checkingAuth) return;
 
-// ---- AI scores + insights ----
-useEffect(() => {
-  if (checkingAuth) return;
+    const fetchHistory = () => {
+      supabase
+        .from("readings")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(HISTORY_LIMIT)
+        .then(({ data, error }) => {
+          if (!error) setHistory(data ?? []);
+        });
+    };
 
-  // latest ai score
-  supabase
-    .from("ai_scores")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .then(({ data }) => {
-      setAiScore(data?.[0] ?? null);
-    });
+    fetchHistory();
+    const poll = setInterval(fetchHistory, 30000); // belt-and-suspenders refresh
+    return () => clearInterval(poll);
+  }, [checkingAuth]);
 
-  // latest insight
-  supabase
-    .from("ai_insights")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .then(({ data }) => {
-      setInsight(data?.[0] ?? null);
-    });
+  // ---- stale banner ----
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!latest?.created_at) return;
+      const age = Date.now() - new Date(latest.created_at).getTime();
+      setStale(age > 60000);
+    }, 5000);
 
-  // realtime ai scores
-  const scoreChannel = supabase
-    .channel("ai-score-live")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "ai_scores",
-      },
-      (payload) => {
-        setAiScore(payload.new);
-      }
-    )
-    .subscribe((status) => {
-      console.log("AI Score:", status);
-    });
+    return () => clearInterval(timer);
+  }, [latest]);
 
-  // realtime insights
-  const insightChannel = supabase
-    .channel("ai-insight-live")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "ai_insights",
-      },
-      (payload) => {
-        setInsight(payload.new);
-      }
-    )
-    .subscribe((status) => {
-      console.log("AI Insight:", status);
-    });
+  // ---- confirmed device state ----
+  useEffect(() => {
+    if (checkingAuth) return;
 
-  return () => {
-    supabase.removeChannel(scoreChannel);
-    supabase.removeChannel(insightChannel);
-  };
-}, [checkingAuth]);
+    const fetchDeviceState = () => {
+      supabase
+        .from("device_state")
+        .select("*")
+        .then(({ data }) => {
+          if (!data) return;
+          const next = {};
+          data.forEach((row) => {
+            next[row.device] = row.state;
+          });
+          setDeviceState(next);
+        });
+    };
+
+    fetchDeviceState();
+
+    const channel = supabase
+      .channel("device-state-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "device_state" },
+        (payload) => {
+          setDeviceState((prev) => ({
+            ...prev,
+            [payload.new.device]: payload.new.state,
+          }));
+        }
+      )
+      .subscribe((status) => {
+        console.log("Device state:", status);
+      });
+
+    const poll = setInterval(fetchDeviceState, POLL_MS);
+
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(poll);
+    };
+  }, [checkingAuth]);
+
+  // ---- AI scores + insights ----
+  useEffect(() => {
+    if (checkingAuth) return;
+
+    const fetchScore = () => {
+      supabase
+        .from("ai_scores")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .then(({ data }) => setAiScore(data?.[0] ?? null));
+    };
+
+    const fetchInsight = () => {
+      supabase
+        .from("ai_insights")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .then(({ data }) => setInsight(data?.[0] ?? null));
+    };
+
+    fetchScore();
+    fetchInsight();
+
+    const scoreChannel = supabase
+      .channel("ai-score-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "ai_scores" },
+        (payload) => setAiScore(payload.new)
+      )
+      .subscribe((status) => console.log("AI Score:", status));
+
+    const insightChannel = supabase
+      .channel("ai-insight-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "ai_insights" },
+        (payload) => setInsight(payload.new)
+      )
+      .subscribe((status) => console.log("AI Insight:", status));
+
+    // AI tables update on a slower cadence (60s / 30min), so a longer poll is enough
+    const poll = setInterval(() => {
+      fetchScore();
+      fetchInsight();
+    }, 30000);
+
+    return () => {
+      supabase.removeChannel(scoreChannel);
+      supabase.removeChannel(insightChannel);
+      clearInterval(poll);
+    };
+  }, [checkingAuth]);
 
   // ---- actuator control (optimistic UI + rollback) ----
-  // `value` = what gets sent to the commands table (the action, e.g. "close")
-  // `optimisticState` = what device_state actually stores once applied (e.g. "closed")
-  // These can differ (roof: action "close" -> resulting state "closed"), so
-  // both must be passed explicitly instead of assuming they're the same string.
   async function sendCommand(device, value, optimisticState, busyFlag, setBusy) {
     if (busyFlag) return;
     setBusy(true);
 
-    // remember previous state in case we need to roll back
     const previousValue = deviceState[device];
-
-    // optimistic update: reflect the change immediately, don't wait for Realtime
     setDeviceState((prev) => ({ ...prev, [device]: optimisticState }));
 
     const { error } = await supabase
@@ -235,7 +247,6 @@ useEffect(() => {
       .insert({ device, action: "set", value });
 
     if (error) {
-      // rollback on failure
       setDeviceState((prev) => ({ ...prev, [device]: previousValue }));
       alert("Command failed: " + error.message);
     }
@@ -243,7 +254,7 @@ useEffect(() => {
     setTimeout(() => setBusy(false), 1500);
   }
 
-  // ---- ask the farm (Phase 7.4) ----
+  // ---- ask the farm ----
   async function askFarm() {
     if (!question.trim()) return;
     setAsking(true);
@@ -303,9 +314,7 @@ useEffect(() => {
           >
             Chilli Farm IoT
           </p>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Field Control
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Field Control</h1>
         </div>
         <div className="flex items-center gap-4">
           <StatusPill stale={stale} hasData={!!latest} />
@@ -325,6 +334,7 @@ useEffect(() => {
           className="text-center text-sm font-mono py-2 tracking-wide"
         >
           ⚠ No new reading in over 60s — check the ESP32 / Node-RED bridge
+          {realtimeIssue && " (realtime link degraded, showing polled data)"}
         </div>
       )}
 
@@ -333,40 +343,28 @@ useEffect(() => {
         <section>
           <SectionLabel>Live Readings</SectionLabel>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 mt-3">
-            <Dial
-              label="Temp"
-              value={latest?.temp}
-              unit="°C"
-              min={15}
-              max={45}
-              color={COLORS.chilli}
-            />
-            <Dial
-              label="Humidity"
-              value={latest?.humidity}
-              unit="%"
-              min={0}
-              max={100}
-              color={COLORS.leaf}
-            />
-            <Dial
-              label="Soil"
-              value={latest?.soil}
-              unit=""
-              min={0}
-              max={1023}
-              color={COLORS.amber}
-              invert
-            />
-            <Dial
-              label="Light"
-              value={latest?.ldr}
-              unit=""
-              min={0}
-              max={1023}
-              color={COLORS.muted}
-            />
+            <Dial label="Temp" value={latest?.temp} unit="°C" min={15} max={45} color={COLORS.chilli} />
+            <Dial label="Humidity" value={latest?.humidity} unit="%" min={0} max={100} color={COLORS.leaf} />
+            <Dial label="Soil" value={latest?.soil} unit="" min={0} max={1023} color={COLORS.amber} invert />
+            <Dial label="Light" value={latest?.ldr} unit="" min={0} max={1023} color={COLORS.muted} />
             <RainTile rain={latest?.rain} />
+          </div>
+        </section>
+
+        {/* NEW: historical trend chart */}
+        <section>
+          <SectionLabel>24h Trend</SectionLabel>
+          <div
+            style={{ background: COLORS.bgRaised, borderColor: COLORS.hairline }}
+            className="rounded-xl border p-5 mt-3"
+          >
+            {history.length > 0 ? (
+              <ReadingsChart data={history} colors={COLORS} />
+            ) : (
+              <p className="text-sm font-mono" style={{ color: COLORS.muted }}>
+                Waiting for enough readings to plot…
+              </p>
+            )}
           </div>
         </section>
 
@@ -379,6 +377,8 @@ useEffect(() => {
               state={deviceState.pump}
               onLabel="ON"
               offLabel="OFF"
+              onColor={COLORS.leaf}
+              offColor={COLORS.chilli}
               busy={pumpBusy}
               onClickOn={() => sendCommand("pump", "on", "on", pumpBusy, setPumpBusy)}
               onClickOff={() => sendCommand("pump", "off", "off", pumpBusy, setPumpBusy)}
@@ -409,9 +409,7 @@ useEffect(() => {
                 Dry ETA
               </p>
               <p className="text-3xl font-semibold mt-1">
-                {aiScore?.dry_eta_minutes != null
-                  ? formatMinutes(aiScore.dry_eta_minutes)
-                  : "—"}
+                {aiScore?.dry_eta_minutes != null ? formatMinutes(aiScore.dry_eta_minutes) : "—"}
               </p>
               <div className="mt-5 space-y-3">
                 <RiskBar label="Disease risk" value={aiScore?.disease_risk} />
@@ -430,14 +428,30 @@ useEffect(() => {
                 {insight?.summary ?? "No report generated yet."}
               </p>
               {insight?.created_at && (
-                <p
-                  className="text-xs mt-3 font-mono"
-                  style={{ color: COLORS.muted }}
-                >
+                <p className="text-xs mt-3 font-mono" style={{ color: COLORS.muted }}>
                   {new Date(insight.created_at).toLocaleString()}
                 </p>
               )}
             </div>
+          </div>
+
+          {/* NEW: 3D plant condition viewer */}
+          <div
+            style={{ background: COLORS.bgRaised, borderColor: COLORS.hairline }}
+            className="rounded-xl border p-5 mt-4"
+          >
+            <p className="font-mono text-sm mb-2" style={{ color: COLORS.muted }}>
+              Plant condition (live)
+            </p>
+            <ChilliPlant3D
+              soil={latest?.soil}
+              rain={latest?.rain}
+              diseaseRisk={aiScore?.disease_risk}
+              heatRisk={aiScore?.heat_risk}
+            />
+            <p className="text-xs font-mono mt-2 text-center" style={{ color: COLORS.muted }}>
+              Droop reflects soil moisture • leaf color reflects disease risk • chilli tone reflects heat risk
+            </p>
           </div>
 
           {/* ask the farm */}
@@ -482,14 +496,11 @@ useEffect(() => {
   );
 }
 
-// ---------------- subcomponents ----------------
+// ---------------- subcomponents (unchanged from original) ----------------
 
 function SectionLabel({ children }) {
   return (
-    <h2
-      style={{ color: COLORS.muted }}
-      className="text-xs font-mono tracking-[0.2em] uppercase"
-    >
+    <h2 style={{ color: COLORS.muted }} className="text-xs font-mono tracking-[0.2em] uppercase">
       {children}
     </h2>
   );
@@ -500,10 +511,7 @@ function StatusPill({ stale, hasData }) {
   const color = !hasData ? COLORS.muted : stale ? COLORS.chilli : COLORS.leaf;
   return (
     <div className="flex items-center gap-2 font-mono text-xs">
-      <span
-        style={{ background: color }}
-        className="w-2 h-2 rounded-full inline-block"
-      />
+      <span style={{ background: color }} className="w-2 h-2 rounded-full inline-block" />
       <span style={{ color }}>{label}</span>
     </div>
   );
@@ -511,9 +519,7 @@ function StatusPill({ stale, hasData }) {
 
 function Dial({ label, value, unit, min, max, color, invert }) {
   const hasValue = value != null;
-  const pct = hasValue
-    ? Math.min(1, Math.max(0, (value - min) / (max - min)))
-    : 0;
+  const pct = hasValue ? Math.min(1, Math.max(0, (value - min) / (max - min))) : 0;
   const displayPct = invert ? 1 - pct : pct;
   const angle = displayPct * 270;
 
@@ -528,10 +534,7 @@ function Dial({ label, value, unit, min, max, color, invert }) {
           background: `conic-gradient(${color} ${angle}deg, ${COLORS.hairline} ${angle}deg 270deg, transparent 270deg 360deg)`,
         }}
       >
-        <div
-          style={{ background: COLORS.bgRaised }}
-          className="w-14 h-14 rounded-full flex items-center justify-center"
-        >
+        <div style={{ background: COLORS.bgRaised }} className="w-14 h-14 rounded-full flex items-center justify-center">
           <span className="font-mono text-sm">
             {hasValue ? Math.round(value) : "--"}
             <span style={{ color: COLORS.muted }} className="text-[10px] ml-0.5">
@@ -540,10 +543,7 @@ function Dial({ label, value, unit, min, max, color, invert }) {
           </span>
         </div>
       </div>
-      <p
-        style={{ color: COLORS.muted }}
-        className="text-xs font-mono mt-2 uppercase tracking-wide"
-      >
+      <p style={{ color: COLORS.muted }} className="text-xs font-mono mt-2 uppercase tracking-wide">
         {label}
       </p>
     </div>
@@ -554,17 +554,11 @@ function RainTile({ rain }) {
   const active = !!rain;
   return (
     <div
-      style={{
-        background: active ? COLORS.leaf : COLORS.bgRaised,
-        borderColor: COLORS.hairline,
-      }}
+      style={{ background: active ? COLORS.leaf : COLORS.bgRaised, borderColor: COLORS.hairline }}
       className="rounded-xl border p-4 flex flex-col items-center justify-center transition"
     >
       <span className="text-2xl">{active ? "🌧" : "☀"}</span>
-      <p
-        style={{ color: active ? COLORS.cream : COLORS.muted }}
-        className="text-xs font-mono mt-2 uppercase tracking-wide"
-      >
+      <p style={{ color: active ? COLORS.cream : COLORS.muted }} className="text-xs font-mono mt-2 uppercase tracking-wide">
         {active ? "Raining" : "Dry"}
       </p>
     </div>
@@ -578,6 +572,8 @@ function ActuatorCard({
   offLabel,
   stateOnValue = "on",
   stateOffValue = "off",
+  onColor = COLORS.chilli,
+  offColor = COLORS.leaf,
   busy,
   onClickOn,
   onClickOff,
@@ -590,10 +586,7 @@ function ActuatorCard({
     >
       <div>
         <p className="font-medium">{name}</p>
-        <p
-          style={{ color: COLORS.muted }}
-          className="text-xs font-mono mt-1 uppercase"
-        >
+        <p style={{ color: COLORS.muted }} className="text-xs font-mono mt-1 uppercase">
           {state ?? "unknown"}
         </p>
       </div>
@@ -601,10 +594,7 @@ function ActuatorCard({
         <button
           onClick={onClickOff}
           disabled={busy}
-          style={{
-            background: !isOn ? COLORS.leaf : "transparent",
-            borderColor: COLORS.hairline,
-          }}
+          style={{ background: !isOn ? offColor : "transparent", borderColor: COLORS.hairline }}
           className="rounded-lg border px-3 py-1.5 text-sm font-mono disabled:opacity-50"
         >
           {offLabel}
@@ -612,10 +602,7 @@ function ActuatorCard({
         <button
           onClick={onClickOn}
           disabled={busy}
-          style={{
-            background: isOn ? COLORS.chilli : "transparent",
-            borderColor: COLORS.hairline,
-          }}
+          style={{ background: isOn ? onColor : "transparent", borderColor: COLORS.hairline }}
           className="rounded-lg border px-3 py-1.5 text-sm font-mono disabled:opacity-50"
         >
           {onLabel}
@@ -634,14 +621,8 @@ function RiskBar({ label, value }) {
         <span style={{ color: COLORS.muted }}>{label}</span>
         <span>{value != null ? `${value}%` : "—"}</span>
       </div>
-      <div
-        style={{ background: COLORS.hairline }}
-        className="h-2 rounded-full overflow-hidden"
-      >
-        <div
-          style={{ width: `${v}%`, background: color }}
-          className="h-full transition-all duration-500"
-        />
+      <div style={{ background: COLORS.hairline }} className="h-2 rounded-full overflow-hidden">
+        <div style={{ width: `${v}%`, background: color }} className="h-full transition-all duration-500" />
       </div>
     </div>
   );
