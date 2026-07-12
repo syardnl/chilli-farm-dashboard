@@ -5,6 +5,9 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import ChilliPlant3D from "./ChilliPlant3D";
 import ReadingsChart from "./ReadingsChart";
+import { getToken, onMessage } from "firebase/messaging";
+import { getFirebaseMessaging } from "@/lib/firebase-client";
+
 
 // ---------- design tokens ----------
 const COLORS = {
@@ -28,6 +31,7 @@ const HISTORY_LIMIT = 30; // how many recent readings to keep for the chart
 const POLL_MS = 10000; // safety-net polling interval, runs alongside realtime
 const PENDING_TIMEOUT_MS = 8000; // give up waiting for confirmation after this long
 
+
 export default function Dashboard() {
   const router = useRouter();
   const [checkingAuth, setCheckingAuth] = useState(true);
@@ -44,6 +48,8 @@ export default function Dashboard() {
   const [asking, setAsking] = useState(false);
   const [pumpBusy, setPumpBusy] = useState(false);
   const [roofBusy, setRoofBusy] = useState(false);
+  const [notificationStatus, setNotificationStatus] =
+  useState("default");
 
   // NEW: surfaces realtime connection problems instead of failing silently
   const [realtimeIssue, setRealtimeIssue] = useState(false);
@@ -98,6 +104,54 @@ export default function Dashboard() {
       listener.subscription.unsubscribe();
     };
   }, [router]);
+
+  useEffect(() => {
+  let unsubscribe = null;
+
+  async function initializeForegroundMessaging() {
+    const messaging =
+      await getFirebaseMessaging();
+
+    if (!messaging) return;
+
+    unsubscribe = onMessage(
+      messaging,
+      (payload) => {
+        console.log(
+          "Foreground notification:",
+          payload
+        );
+
+        const title =
+          payload.notification?.title ||
+          payload.data?.title ||
+          "Chilli Farm Alert";
+
+        const body =
+          payload.notification?.body ||
+          payload.data?.body ||
+          "A farm event has been detected.";
+
+        if (
+          Notification.permission === "granted"
+        ) {
+          new Notification(title, {
+            body,
+            icon: "/icons/icon-192.png",
+          });
+        }
+      }
+    );
+  }
+
+  initializeForegroundMessaging();
+
+  return () => {
+    if (unsubscribe) {
+      unsubscribe();
+    }
+  };
+}, []);
 
   // ---- live readings (single latest row) ----
   useEffect(() => {
@@ -388,6 +442,118 @@ export default function Dashboard() {
     }
   }
 
+  async function enablePushNotifications() {
+  try {
+    if (!("Notification" in window)) {
+      alert("Browser ini tidak menyokong notification.");
+      return;
+    }
+
+    if (!("serviceWorker" in navigator)) {
+      alert("Browser ini tidak menyokong service worker.");
+      return;
+    }
+
+    const permission =
+      await Notification.requestPermission();
+
+    setNotificationStatus(permission);
+
+    if (permission !== "granted") {
+      alert(
+        "Notification tidak dibenarkan. Sila benarkan melalui browser settings."
+      );
+      return;
+    }
+
+    const registration =
+      await navigator.serviceWorker.register(
+        "/firebase-messaging-sw.js"
+      );
+
+    await navigator.serviceWorker.ready;
+
+    const messaging =
+      await getFirebaseMessaging();
+
+    if (!messaging) {
+      alert(
+        "Firebase Messaging tidak disokong pada browser ini."
+      );
+      return;
+    }
+
+    const token = await getToken(messaging, {
+      vapidKey:
+        process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY,
+      serviceWorkerRegistration: registration,
+    });
+
+    if (!token) {
+      throw new Error(
+        "FCM registration token tidak berjaya dijana."
+      );
+    }
+
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
+
+    if (sessionError) {
+      throw sessionError;
+    }
+
+    if (!session?.user?.id) {
+      throw new Error(
+        "Sila log masuk sebelum mengaktifkan notification."
+      );
+    }
+
+    const { error } = await supabase
+      .from("push_subscriptions")
+      .upsert(
+        {
+          user_id: session.user.id,
+          token,
+          user_agent: navigator.userAgent,
+          platform:
+            navigator.userAgentData?.platform ||
+            navigator.platform ||
+            "unknown",
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "token",
+        }
+      );
+
+    if (error) {
+      throw error;
+    }
+
+    new Notification(
+      "Chilli Farm Notifications Enabled",
+      {
+        body:
+          "Telefon ini kini boleh menerima amaran daripada ladang.",
+        icon: "/icons/icon-192.png",
+      }
+    );
+
+    alert("Notification berjaya diaktifkan.");
+  } catch (error) {
+    console.error(
+      "Enable notification failed:",
+      error
+    );
+
+    alert(
+      `Gagal mengaktifkan notification: ${error.message}`
+    );
+  }
+}
+
   async function handleSignOut() {
     await supabase.auth.signOut();
     router.push("/login");
@@ -587,6 +753,33 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-4">
           <StatusPill stale={stale} hasData={!!latest} />
+
+          <button
+  onClick={enablePushNotifications}
+  disabled={notificationStatus === "granted"}
+  style={{
+    color: COLORS.cream,
+    borderColor: COLORS.hairline,
+    background:
+      notificationStatus === "granted"
+        ? COLORS.leafDark
+        : "transparent",
+  }}
+  className="
+    actuator-button
+    text-xs
+    font-mono
+    border
+    rounded-xl
+    px-4
+    py-2
+    disabled:opacity-70
+  "
+>
+  {notificationStatus === "granted"
+    ? "Notifications Enabled"
+    : "Enable Notifications"}
+</button>
           <button
             onClick={handleSignOut}
             style={{ color: COLORS.muted, borderColor: COLORS.hairline }}
