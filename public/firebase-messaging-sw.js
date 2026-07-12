@@ -7,12 +7,12 @@ importScripts(
 );
 
 firebase.initializeApp({
-  apiKey: "PASTE_FIREBASE_API_KEY",
-  authDomain: "PASTE_PROJECT.firebaseapp.com",
-  projectId: "PASTE_PROJECT_ID",
-  storageBucket: "PASTE_STORAGE_BUCKET",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId: "PASTE_APP_ID",
+  apiKey: "AIzaSyC02DgQU1uEsZI90PZjI0dxGEbfrn0xwtA",
+  authDomain: "chilli-farm-notification.firebaseapp.com",
+  projectId: "chilli-farm-notification",
+  storageBucket: "chilli-farm-notification.firebasestorage.app",
+  messagingSenderId: "911607708461",
+  appId: "1:911607708461:web:8021785445b23e745c71a4",
 });
 
 const messaging = firebase.messaging();
