@@ -511,35 +511,59 @@ export default function Dashboard() {
     }
 
     const { error } = await supabase
-      .from("push_subscriptions")
-      .upsert(
-        {
-          user_id: session.user.id,
-          token,
-          user_agent: navigator.userAgent,
-          platform:
-            navigator.userAgentData?.platform ||
-            navigator.platform ||
-            "unknown",
-          updated_at: new Date().toISOString(),
-        },
-        {
-          onConflict: "token",
-        }
-      );
+  .from("push_subscriptions")
+  .upsert(
+    {
+      user_id: session.user.id,
+      token,
+      user_agent: navigator.userAgent,
+      platform:
+        navigator.userAgentData?.platform ||
+        navigator.platform ||
+        "unknown",
+      updated_at: new Date().toISOString(),
+    },
+    {
+      onConflict: "token",
+    }
+  );
+
+if (error) {
+  throw error;
+}
+
+await registration.showNotification(
+  "Chilli Farm Notifications Enabled",
+  {
+    body:
+      "Telefon ini kini boleh menerima amaran daripada ladang.",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    tag: "notification-enabled",
+    data: {
+      url: "/",
+    },
+  }
+);
+
+alert("Notification berjaya diaktifkan.");
 
     if (error) {
       throw error;
     }
 
-    new Notification(
-      "Chilli Farm Notifications Enabled",
-      {
-        body:
-          "Telefon ini kini boleh menerima amaran daripada ladang.",
-        icon: "/icons/icon-192.png",
-      }
-    );
+    await registration.showNotification(
+  "Chilli Farm Notifications Enabled",
+  {
+    body:
+      "Telefon ini kini boleh menerima amaran daripada ladang.",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    data: {
+      url: "/",
+    },
+  }
+);
 
     alert("Notification berjaya diaktifkan.");
   } catch (error) {
