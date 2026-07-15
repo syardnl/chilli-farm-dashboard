@@ -537,8 +537,8 @@ await registration.showNotification(
   {
     body:
       "Telefon ini kini boleh menerima amaran daripada ladang.",
-    icon: "/icons/icon-192.png",
-    badge: "/icons/icon-192.png",
+    icon: "/icon/icon-192.png",
+    badge: "/icon/icon-192.png",
     tag: "notification-enabled",
     data: {
       url: "/",
@@ -546,24 +546,6 @@ await registration.showNotification(
   }
 );
 
-alert("Notification berjaya diaktifkan.");
-
-    if (error) {
-      throw error;
-    }
-
-    await registration.showNotification(
-  "Chilli Farm Notifications Enabled",
-  {
-    body:
-      "Telefon ini kini boleh menerima amaran daripada ladang.",
-    icon: "/icons/icon-192.png",
-    badge: "/icons/icon-192.png",
-    data: {
-      url: "/",
-    },
-  }
-);
 
     alert("Notification berjaya diaktifkan.");
   } catch (error) {
