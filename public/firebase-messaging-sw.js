@@ -24,49 +24,51 @@ messaging.onBackgroundMessage((payload) => {
   );
 
   const title =
-    payload.notification?.title ||
     payload.data?.title ||
+    payload.notification?.title ||
     "Chilli Farm Alert";
 
-  const options = {
-    body:
-      payload.notification?.body ||
-      payload.data?.body ||
-      "A farm event has been detected.",
+  const body =
+    payload.data?.body ||
+    payload.notification?.body ||
+    "A farm event has been detected.";
 
+  const type = payload.data?.type || "general";
+  const url = payload.data?.url || "/";
+
+  return self.registration.showNotification(title, {
+    body,
     icon: "/icon/icon-192.png",
     badge: "/icon/icon-192.png",
-
-    data: {
-      url: payload.data?.url || "/",
-    },
-
-    tag: payload.data?.type || "chilli-farm-alert",
+    tag: `chilli-farm-${type}`,
     renotify: false,
-  };
-
-  self.registration.showNotification(title, options);
+    data: { url },
+  });
 });
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
 
-  const destination =
-    event.notification.data?.url || "/";
+  const destination = event.notification.data?.url || "/";
 
   event.waitUntil(
-    clients.matchAll({
-      type: "window",
-      includeUncontrolled: true,
-    }).then((clientList) => {
-      for (const client of clientList) {
-        if ("focus" in client) {
-          client.navigate(destination);
-          return client.focus();
-        }
-      }
+    clients
+      .matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      })
+      .then(async (clientList) => {
+        for (const client of clientList) {
+          if ("navigate" in client) {
+            await client.navigate(destination);
+          }
 
-      return clients.openWindow(destination);
-    })
+          if ("focus" in client) {
+            return client.focus();
+          }
+        }
+
+        return clients.openWindow(destination);
+      })
   );
 });

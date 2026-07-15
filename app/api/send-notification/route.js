@@ -15,7 +15,10 @@ export async function POST(request) {
     const expectedAuthorization =
       `Bearer ${process.env.NOTIFICATION_API_SECRET}`;
 
-    if (authorization !== expectedAuthorization) {
+    if (
+      !process.env.NOTIFICATION_API_SECRET ||
+      authorization !== expectedAuthorization
+    ) {
       return NextResponse.json(
         {
           success: false,
@@ -29,18 +32,20 @@ export async function POST(request) {
 
     const payload = await request.json();
 
-    const title =
-      payload.title || "Chilli Farm Alert";
+    const title = String(
+      payload.title || "Chilli Farm Alert"
+    );
 
-    const body =
-      payload.body || "A farm event has been detected.";
+    const body = String(
+      payload.body || "A farm event has been detected."
+    );
 
-    const type =
-      payload.type || "general";
+    const type = String(payload.type || "general");
 
-    const url =
+    const url = String(
       payload.url ||
-      "https://chilli-farm-dashboard-dun.vercel.app/";
+        "https://chilli-farm-dashboard-dun.vercel.app/"
+    );
 
     const { data: subscriptions, error: subscriptionError } =
       await supabaseAdmin
@@ -70,37 +75,26 @@ export async function POST(request) {
 
     const messaging = getFirebaseAdminMessaging();
 
-    const result =
-      await messaging.sendEachForMulticast({
-        tokens,
-
-        notification: {
-          title,
-          body,
+    // Data-only payload gives the dashboard and service worker full control
+    // over foreground/background display and prevents duplicate notifications.
+    const result = await messaging.sendEachForMulticast({
+      tokens,
+      data: {
+        title,
+        body,
+        type,
+        url,
+      },
+      webpush: {
+        headers: {
+          Urgency: "high",
+          TTL: "300",
         },
-
-        data: {
-          title,
-          body,
-          type,
-          url,
+        fcmOptions: {
+          link: url,
         },
-
-        webpush: {
-          notification: {
-            title,
-            body,
-            icon: "/icons/icon-192.png",
-            badge: "/icons/icon-192.png",
-            tag: `chilli-farm-${type}`,
-            renotify: false,
-          },
-
-          fcmOptions: {
-            link: url,
-          },
-        },
-      });
+      },
+    });
 
     const failedTokens = [];
 
@@ -108,7 +102,8 @@ export async function POST(request) {
       if (!response.success) {
         failedTokens.push({
           token: tokens[index],
-          error: response.error?.message || "Unknown FCM error",
+          error:
+            response.error?.message || "Unknown FCM error",
           code: response.error?.code || null,
         });
       }
@@ -126,7 +121,8 @@ export async function POST(request) {
     return NextResponse.json(
       {
         success: false,
-        error: error.message || "Notification sending failed.",
+        error:
+          error?.message || "Notification sending failed.",
       },
       {
         status: 500,

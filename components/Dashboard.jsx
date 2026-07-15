@@ -48,8 +48,8 @@ export default function Dashboard() {
   const [asking, setAsking] = useState(false);
   const [pumpBusy, setPumpBusy] = useState(false);
   const [roofBusy, setRoofBusy] = useState(false);
-  const [notificationStatus, setNotificationStatus] =
-  useState("default");
+  const [notificationStatus, setNotificationStatus] = useState("default");
+  const [pushAlert, setPushAlert] = useState(null);
 
   // NEW: surfaces realtime connection problems instead of failing silently
   const [realtimeIssue, setRealtimeIssue] = useState(false);
@@ -106,52 +106,77 @@ export default function Dashboard() {
   }, [router]);
 
   useEffect(() => {
-  let unsubscribe = null;
+    let unsubscribe = null;
+    let cancelled = false;
 
-  async function initializeForegroundMessaging() {
-    const messaging =
-      await getFirebaseMessaging();
-
-    if (!messaging) return;
-
-    unsubscribe = onMessage(
-      messaging,
-      (payload) => {
-        console.log(
-          "Foreground notification:",
-          payload
-        );
-
-        const title =
-          payload.notification?.title ||
-          payload.data?.title ||
-          "Chilli Farm Alert";
-
-        const body =
-          payload.notification?.body ||
-          payload.data?.body ||
-          "A farm event has been detected.";
-
-        if (
-          Notification.permission === "granted"
-        ) {
-          new Notification(title, {
-            body,
-            icon: "/icons/icon-192.png",
-          });
+    async function initializeForegroundMessaging() {
+      try {
+        if (!("serviceWorker" in navigator)) {
+          console.warn("Service worker is not supported by this browser.");
+          return;
         }
+
+        // Register early so foreground and background FCM share one worker.
+        await navigator.serviceWorker.register("/firebase-messaging-sw.js");
+
+        const messaging = await getFirebaseMessaging();
+        if (!messaging || cancelled) return;
+
+        unsubscribe = onMessage(messaging, async (payload) => {
+          console.log("Foreground notification:", payload);
+
+          const title =
+            payload.data?.title ||
+            payload.notification?.title ||
+            "Chilli Farm Alert";
+
+          const body =
+            payload.data?.body ||
+            payload.notification?.body ||
+            "A farm event has been detected.";
+
+          const type = payload.data?.type || "general";
+          const url = payload.data?.url || "/";
+
+          // Visible notification inside the dashboard.
+          setPushAlert({ title, body, type, url });
+
+          // Also show the operating-system notification while the tab is active.
+          if (Notification.permission === "granted") {
+            const registration = await navigator.serviceWorker.ready;
+
+            await registration.showNotification(title, {
+              body,
+              icon: "/icon/icon-192.png",
+              badge: "/icon/icon-192.png",
+              tag: `chilli-farm-${type}`,
+              renotify: false,
+              data: { url },
+            });
+          }
+        });
+      } catch (error) {
+        console.error("Foreground messaging setup failed:", error);
       }
-    );
-  }
-
-  initializeForegroundMessaging();
-
-  return () => {
-    if (unsubscribe) {
-      unsubscribe();
     }
-  };
-}, []);
+
+    initializeForegroundMessaging();
+
+    return () => {
+      cancelled = true;
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pushAlert) return;
+
+    const timer = setTimeout(() => {
+      setPushAlert(null);
+    }, 8000);
+
+    return () => clearTimeout(timer);
+  }, [pushAlert]);
 
   // ---- live readings (single latest row) ----
   useEffect(() => {
@@ -738,6 +763,29 @@ await registration.showNotification(
       <div className="ambient-orb one" />
       <div className="ambient-orb two" />
       <div className="ambient-orb three" />
+
+      {pushAlert && (
+        <div className="fixed right-4 top-4 z-[9999] w-[calc(100%-2rem)] max-w-sm rounded-2xl border border-emerald-300/40 bg-[#062719]/95 p-4 shadow-2xl backdrop-blur-xl">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-emerald-200">
+                {pushAlert.title}
+              </p>
+              <p className="mt-1 text-sm text-emerald-50/80">
+                {pushAlert.body}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPushAlert(null)}
+              className="text-xl leading-none text-emerald-100/60 hover:text-emerald-100"
+              aria-label="Close notification"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       {/* header */}
       <header
         style={{ borderColor: COLORS.hairline }}
