@@ -34,8 +34,8 @@ messaging.onBackgroundMessage((payload) => {
       payload.data?.body ||
       "A farm event has been detected.",
 
-    icon: "/icons/icon-192.png",
-    badge: "/icons/icon-192.png",
+    icon: "/icon/icon-192.png",
+    badge: "/icon/icon-192.png",
 
     data: {
       url: payload.data?.url || "/",
